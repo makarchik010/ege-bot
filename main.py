@@ -44,13 +44,13 @@ async def cmd_lesson(message: Message, state: FSMContext):
     lesson = await get_lesson(lesson_id)
     
     if not lesson:
-        await message.answer("🏆 Красава! Ты полностью закрыл первый спринт уроков!")
+        await message.answer("🏆 Красава! Ты полностью закрыл текущий спринт уроков!")
         return
 
     text = (
         f"📖 **Урок {lesson['lesson_id']}: {lesson['title']}**\n\n"
-        f"💡 **Теория и код:**\n{lesson['theory']}\n\n"
-        f"🎯 **Задача для закрепления:**\n{lesson['task_text']}"
+        f"💡 **Теория и шаблон:**\n{lesson['theory']}\n\n"
+        f"🎯 **Практика:**\n{lesson['task_text']}"
     )
     
     await message.answer(text, parse_mode="Markdown")
@@ -69,14 +69,14 @@ async def check_answer(message: Message, state: FSMContext):
     correct_answer = data.get("correct_answer")
     current_lesson = data.get("current_lesson")
     
-    if message.text.strip().lower() == correct_answer.strip().lower():
+    if message.text.strip().lower() == str(correct_answer).strip().lower():
         await reset_attempts_and_next_lesson(message.from_user.id, current_lesson + 1)
-        await message.answer("✅ Четко! Ответ правильный. Урок засчитан.\n\nЖми /lesson, чтобы перейти к следующему.")
+        await message.answer("✅ Ответ верный! Урок зачтен.\n\nЖми /lesson, чтобы перейти к следующему.")
         await state.clear()
     else:
         await increment_attempts(message.from_user.id)
         await message.answer(
-            "❌ Не сошлось. Проверь код или пересчитай условия.\n\nЕсли застрял — жми кнопку ниже:",
+            "❌ Не сошлось. Проверь код или пересчитай.\n\nНужна подсказка — жми кнопку:",
             reply_markup=get_hint_keyboard()
         )
 
@@ -87,7 +87,6 @@ async def show_hint(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(f"🔍 **Подсказка:**\n{hint}", parse_mode="Markdown")
     await callback.answer()
 
-# Сервер-заглушка для бесплатного тарифа Render
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
