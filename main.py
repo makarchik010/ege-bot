@@ -1,13 +1,20 @@
 import os
 import asyncio
 from aiohttp import web
-from aiogram import Bot, Dispatcher, Router
-from aiogram.types import Message
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database import init_db, add_user, get_user_lesson_id, get_lesson, update_user_lesson
+from database import (
+    init_db,
+    add_user,
+    get_user,
+    get_lesson,
+    increment_attempts,
+    reset_attempts_and_next_lesson
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -16,35 +23,45 @@ router = Router()
 class TaskState(StatesGroup):
     waiting_for_answer = State()
 
+def get_hint_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💡 Получить подсказку", callback_data="get_hint")]
+    ])
+
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     await add_user(message.from_user.id)
     await message.answer(
-        "👋 Бот готов к работе!\n\n"
-        "Жми /lesson, чтобы открыть первый урок."
+        "👋 Привет! Ты на курсе подготовки к ЕГЭ по информатике.\n\n"
+        "Спринт 1: Базовая логика, комбинаторика и кодирование.\n"
+        "Жми /lesson, чтобы открыть текущий урок."
     )
 
 @router.message(Command("lesson"))
 async def cmd_lesson(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    lesson_id = await get_user_lesson_id(user_id)
+    user = await get_user(message.from_user.id)
+    lesson_id = user["current_lesson"] if user else 1
     lesson = await get_lesson(lesson_id)
     
     if not lesson:
-        await message.answer("🎉 Все доступные уроки пройдены!")
+        await message.answer("🏆 Красава! Ты полностью закрыл первый спринт уроков!")
         return
 
     text = (
         f"📖 **Урок {lesson['lesson_id']}: {lesson['title']}**\n\n"
-        f"💡 **Теория:**\n{lesson['theory']}\n\n"
-        f"🎯 **Задача:**\n{lesson['task_text']}"
+        f"💡 **Теория и код:**\n{lesson['theory']}\n\n"
+        f"🎯 **Задача для закрепления:**\n{lesson['task_text']}"
     )
     
     await message.answer(text, parse_mode="Markdown")
-    await message.answer("Напиши ответ числом:")
+    await message.answer("Введи ответ числом или строкой:")
     
     await state.set_state(TaskState.waiting_for_answer)
-    await state.update_data(correct_answer=lesson["answer"], current_lesson=lesson["lesson_id"])
+    await state.update_data(
+        correct_answer=lesson["answer"],
+        current_lesson=lesson["lesson_id"],
+        hint=lesson["hint"]
+    )
 
 @router.message(TaskState.waiting_for_answer)
 async def check_answer(message: Message, state: FSMContext):
@@ -53,11 +70,22 @@ async def check_answer(message: Message, state: FSMContext):
     current_lesson = data.get("current_lesson")
     
     if message.text.strip().lower() == correct_answer.strip().lower():
-        await update_user_lesson(message.from_user.id, current_lesson + 1)
-        await message.answer("✅ Ответ верный! Урок зачтен.\nЖми /lesson для следующего.")
+        await reset_attempts_and_next_lesson(message.from_user.id, current_lesson + 1)
+        await message.answer("✅ Четко! Ответ правильный. Урок засчитан.\n\nЖми /lesson, чтобы перейти к следующему.")
         await state.clear()
     else:
-        await message.answer("❌ Ответ неверный. Попробуй еще раз.")
+        await increment_attempts(message.from_user.id)
+        await message.answer(
+            "❌ Не сошлось. Проверь код или пересчитай условия.\n\nЕсли застрял — жми кнопку ниже:",
+            reply_markup=get_hint_keyboard()
+        )
+
+@router.callback_query(F.data == "get_hint")
+async def show_hint(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    hint = data.get("hint", "Подсказка отсутствует.")
+    await callback.message.answer(f"🔍 **Подсказка:**\n{hint}", parse_mode="Markdown")
+    await callback.answer()
 
 # Сервер-заглушка для бесплатного тарифа Render
 async def handle_ping(request):
@@ -74,7 +102,7 @@ async def start_dummy_server():
 
 async def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN не задан в Environment Variables!")
+        raise ValueError("BOT_TOKEN не задан!")
         
     await init_db()
     await start_dummy_server()
