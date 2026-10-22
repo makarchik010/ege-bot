@@ -6,8 +6,11 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 
 from database import (
-    init_db, add_user, get_task, 
-    mark_task_completed, get_user_progress
+    init_db,
+    add_user,
+    get_task,
+    mark_task_completed,
+    get_user_progress
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,7 +19,6 @@ router = Router()
 def build_catalog_keyboard(progress: set):
     buttons = []
     row = []
-    # Формируем аккуратную сетку кнопок 5 в ряд
     for num in range(1, 28):
         icon = "✅" if num in progress else str(num)
         row.append(InlineKeyboardButton(text=icon, callback_data=f"open_task_{num}"))
@@ -26,7 +28,6 @@ def build_catalog_keyboard(progress: set):
     if row:
         buttons.append(row)
     
-    # Служебные кнопки
     buttons.append([
         InlineKeyboardButton(text="📊 Мой профиль и статистика", callback_data="show_stats")
     ])
@@ -50,7 +51,7 @@ async def cmd_start(message: Message):
     text = (
         "💻 **Интерактивный тренажер ЕГЭ по информатике**\n\n"
         f"Твой прогресс: **{total_done} из 27 заданий закрыто**.\n\n"
-        "Выбирай нужный номер из сетки КИМ ниже для изучения теории, авторских скриптов и отработки:"
+        "Выбирай нужный номер из сетки КИМ ниже для изучения теории, скриптов и отработки:"
     )
     await message.answer(text, reply_markup=build_catalog_keyboard(progress), parse_mode="Markdown")
 
@@ -93,7 +94,6 @@ async def read_theory(callback: CallbackQuery):
         with open(file_path, "r", encoding="utf-8") as f:
             theory_text = f.read()
         
-        # Надежная разбивка без Markdown-крашей
         if len(theory_text) > 4000:
             parts = [theory_text[i:i+4000] for i in range(0, len(theory_text), 4000)]
             for p in parts:
@@ -114,7 +114,6 @@ async def toggle_done(callback: CallbackQuery):
         await mark_task_completed(callback.from_user.id, task_num)
         await callback.answer("Номер отмечен как сданный! 🎯", show_alert=False)
     
-    # Обновляем экран задания
     task = await get_task(task_num)
     new_progress = await get_user_progress(callback.from_user.id)
     is_done = task_num in new_progress
@@ -137,7 +136,6 @@ async def show_stats(callback: CallbackQuery):
     progress = await get_user_progress(callback.from_user.id)
     primary_score = len(progress)
     
-    # Примерная оценка шкалы перевода
     estimated_secondary = min(100, int((primary_score / 27) * 100))
     
     text = (
