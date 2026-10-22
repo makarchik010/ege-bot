@@ -4,156 +4,156 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 
 from database import (
-    init_db, add_user, get_user, get_lesson, 
-    set_user_stage, next_lesson
+    init_db, add_user, get_task, 
+    mark_task_completed, get_user_progress
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 router = Router()
 
-class BotState(StatesGroup):
-    answering_warmup = State()
-    answering_exam = State()
-
-def main_menu_keyboard(lesson_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📚 Полный разбор + Шаблон кода", callback_data=f"theory_{lesson_id}")],
-        [InlineKeyboardButton(text="⚡ Разминочная задача", callback_data=f"warmup_{lesson_id}")],
-        [InlineKeyboardButton(text="🎯 Боевая задача ЕГЭ", callback_data=f"exam_{lesson_id}")]
+def build_catalog_keyboard(progress: set):
+    buttons = []
+    row = []
+    # Формируем аккуратную сетку кнопок 5 в ряд
+    for num in range(1, 28):
+        icon = "✅" if num in progress else str(num)
+        row.append(InlineKeyboardButton(text=icon, callback_data=f"open_task_{num}"))
+        if len(row) == 5:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    # Служебные кнопки
+    buttons.append([
+        InlineKeyboardButton(text="📊 Мой профиль и статистика", callback_data="show_stats")
     ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def task_action_keyboard():
+def task_action_keyboard(task_num: int, is_done: bool):
+    done_text = "❌ Сбросить отметку" if is_done else "✅ Отметить как решенное"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💡 Взять подсказку", callback_data="get_hint")],
-        [InlineKeyboardButton(text="🔙 Вернуться в меню урока", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="📖 Открыть разбор и код-шаблон", callback_data=f"read_theory_{task_num}")],
+        [InlineKeyboardButton(text=done_text, callback_data=f"toggle_done_{task_num}")],
+        [InlineKeyboardButton(text="◀️ Назад к списку заданий", callback_data="back_to_catalog")]
     ])
 
 @router.message(Command("start"))
 @router.message(Command("menu"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
+async def cmd_start(message: Message):
     await add_user(message.from_user.id)
-    user = await get_user(message.from_user.id)
-    lesson_id = user["current_lesson"] if user else 1
-    lesson = await get_lesson(lesson_id)
+    progress = await get_user_progress(message.from_user.id)
     
-    if not lesson:
-        await message.answer("🏆 Ты закрыл всю доступную программу курса!")
-        return
-
+    total_done = len(progress)
     text = (
-        f"🎓 **Твой личный ментор по информатике**\n\n"
-        f"Текущий модуль: **{lesson['title']}**\n"
-        f"Выбирай действие в меню:"
+        "💻 **Интерактивный тренажер ЕГЭ по информатике**\n\n"
+        f"Твой прогресс: **{total_done} из 27 заданий закрыто**.\n\n"
+        "Выбирай нужный номер из сетки КИМ ниже для изучения теории, авторских скриптов и отработки:"
     )
-    await message.answer(text, reply_markup=main_menu_keyboard(lesson_id), parse_mode="Markdown")
+    await message.answer(text, reply_markup=build_catalog_keyboard(progress), parse_mode="Markdown")
 
-@router.callback_query(F.data.startswith("theory_"))
-async def send_theory(callback: CallbackQuery):
-    lesson_id = int(callback.data.split("_")[1])
-    lesson = await get_lesson(lesson_id)
+@router.callback_query(F.data == "back_to_catalog")
+async def back_to_catalog(callback: CallbackQuery):
+    progress = await get_user_progress(callback.from_user.id)
+    text = "Выбери номер задания из экзаменационной сетки:"
+    await callback.message.edit_text(text, reply_markup=build_catalog_keyboard(progress))
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("open_task_"))
+async def open_task(callback: CallbackQuery):
+    task_num = int(callback.data.split("_")[2])
+    task = await get_task(task_num)
+    progress = await get_user_progress(callback.from_user.id)
+    is_done = task_num in progress
     
-    file_path = lesson["theory_file"]
+    status_icon = "✅ Изучено" if is_done else "⏳ В процессе"
+    
+    text = (
+        f"🎯 **{task['title']}**\n"
+        f"Статус: {status_icon}\n\n"
+        f"**Суть номера:**\n{task['description']}\n\n"
+        "Изучи методику решения или отметь номер после сдачи:"
+    )
+    await callback.message.edit_text(
+        text, 
+        reply_markup=task_action_keyboard(task_num, is_done),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("read_theory_"))
+async def read_theory(callback: CallbackQuery):
+    task_num = int(callback.data.split("_")[2])
+    task = await get_task(task_num)
+    
+    file_path = task["theory_file"]
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
             theory_text = f.read()
         
-        # Телеграм лимитирует сообщения по 4000 символов, бьем длинный текст
+        # Надежная разбивка без Markdown-крашей
         if len(theory_text) > 4000:
             parts = [theory_text[i:i+4000] for i in range(0, len(theory_text), 4000)]
             for p in parts:
-                await callback.message.answer(p, parse_mode="Markdown")
+                await callback.message.answer(p)
         else:
-            await callback.message.answer(theory_text, parse_mode="Markdown")
+            await callback.message.answer(theory_text)
     else:
-        await callback.message.answer("⚠️ Файл с теорией не найден.")
-    
-    await callback.message.answer("Готов к практике?", reply_markup=main_menu_keyboard(lesson_id))
+        await callback.message.answer(f"📌 Разбор для задания №{task_num} находится на оформлении в актуальной версии КИМ.")
+        
     await callback.answer()
 
-@router.callback_query(F.data.startswith("warmup_"))
-async def start_warmup(callback: CallbackQuery, state: FSMContext):
-    lesson_id = int(callback.data.split("_")[1])
-    lesson = await get_lesson(lesson_id)
+@router.callback_query(F.data.startswith("toggle_done_"))
+async def toggle_done(callback: CallbackQuery):
+    task_num = int(callback.data.split("_")[2])
+    progress = await get_user_progress(callback.from_user.id)
     
-    await state.set_state(BotState.answering_warmup)
-    await state.update_data(
-        target_answer=lesson["warmup_answer"],
-        hint=lesson["hint"],
-        lesson_id=lesson_id
+    if task_num not in progress:
+        await mark_task_completed(callback.from_user.id, task_num)
+        await callback.answer("Номер отмечен как сданный! 🎯", show_alert=False)
+    
+    # Обновляем экран задания
+    task = await get_task(task_num)
+    new_progress = await get_user_progress(callback.from_user.id)
+    is_done = task_num in new_progress
+    status_icon = "✅ Изучено" if is_done else "⏳ В процессе"
+    
+    text = (
+        f"🎯 **{task['title']}**\n"
+        f"Статус: {status_icon}\n\n"
+        f"**Суть номера:**\n{task['description']}\n\n"
+        "Изучи методику решения или отметь номер после сдачи:"
     )
-    
-    text = f"⚡ **Разминка:**\n\n{lesson['warmup_task']}\n\nВведи полученный ответ:"
-    await callback.message.answer(text, reply_markup=task_action_keyboard(), parse_mode="Markdown")
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("exam_"))
-async def start_exam(callback: CallbackQuery, state: FSMContext):
-    lesson_id = int(callback.data.split("_")[1])
-    lesson = await get_lesson(lesson_id)
-    
-    await state.set_state(BotState.answering_exam)
-    await state.update_data(
-        target_answer=lesson["exam_answer"],
-        hint=lesson["hint"],
-        lesson_id=lesson_id
+    await callback.message.edit_text(
+        text, 
+        reply_markup=task_action_keyboard(task_num, is_done),
+        parse_mode="Markdown"
     )
+
+@router.callback_query(F.data == "show_stats")
+async def show_stats(callback: CallbackQuery):
+    progress = await get_user_progress(callback.from_user.id)
+    primary_score = len(progress)
     
-    text = f"🎯 **Боевая задача уровня ЕГЭ:**\n\n{lesson['exam_task']}\n\nВведи ответ числом:"
-    await callback.message.answer(text, reply_markup=task_action_keyboard(), parse_mode="Markdown")
-    await callback.answer()
-
-@router.message(BotState.answering_warmup)
-@router.message(BotState.answering_exam)
-async def check_user_answer(message: Message, state: FSMContext):
-    data = await state.get_data()
-    expected = str(data.get("target_answer", "")).strip().lower()
-    lesson_id = data.get("lesson_id")
-    current_state = await state.get_state()
-
-    if message.text.strip().lower() == expected:
-        if current_state == BotState.answering_exam.state:
-            await next_lesson(message.from_user.id, lesson_id + 1)
-            await message.answer(
-                "🔥 **Красава! Боевая задача решена чисто.**\n"
-                "Балл в кармане. Модуль официально закрыт!\n\n"
-                "Жми /menu, чтобы перейти к следующему номеру ЕГЭ.",
-                parse_mode="Markdown"
-            )
-            await state.clear()
-        else:
-            await message.answer(
-                "✅ Разминка пройдена верно! Теперь попробуй боевую задачу ЕГЭ.",
-                reply_markup=main_menu_keyboard(lesson_id)
-            )
-            await state.clear()
-    else:
-        await message.answer(
-            "❌ Ответ не сошелся. Проверь логику кода или возьми подсказку.",
-            reply_markup=task_action_keyboard()
-        )
-
-@router.callback_query(F.data == "get_hint")
-async def give_hint(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    hint = data.get("hint", "Внимательно перечитай шаблон теории.")
-    await callback.message.answer(f"💡 **Наводка по алгоритму:**\n\n{hint}", parse_mode="Markdown")
-    await callback.answer()
-
-@router.callback_query(F.data == "back_to_menu")
-async def back_menu(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    lesson_id = data.get("lesson_id", 1)
-    await state.clear()
-    await callback.message.answer("Возвращаемся в меню модуля:", reply_markup=main_menu_keyboard(lesson_id))
+    # Примерная оценка шкалы перевода
+    estimated_secondary = min(100, int((primary_score / 27) * 100))
+    
+    text = (
+        "📈 **Аналитика твоей подготовки**\n\n"
+        f"• Закрыто номеров: **{primary_score} / 27**\n"
+        f"• Примерный вторичный балл: **~{estimated_secondary} / 100**\n\n"
+        "Продолжай закрывать номера по списку, чтобы выйти на стабильные 90+."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к сетке", callback_data="back_to_catalog")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 
 async def handle_ping(request):
-    return web.Response(text="EGE Bot Mentor Live!")
+    return web.Response(text="EGE Trainer Online")
 
 async def start_dummy_server():
     app = web.Application()
@@ -166,7 +166,7 @@ async def start_dummy_server():
 
 async def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN отсутствует!")
+        raise ValueError("BOT_TOKEN не задан!")
         
     await init_db()
     await start_dummy_server()
@@ -175,7 +175,7 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     
-    print("🚀 Репетитор успешно запущен!")
+    print("🚀 Тренажер успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
